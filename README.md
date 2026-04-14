@@ -1,261 +1,428 @@
-# Link Prediction on Multilayer Networks through Learning of Within-Layer and Across-Layer Node-Pair  Structural Features and Node Embedding Similarity
+# ML-Link + Temporal Side Information on the CNS Dataset
 
+This README describes how to reproduce all six experiments (E1–E4, E7–E8) from the
+project *"Temporal Side Information for Multilayer Link Prediction"* on the
+**Copenhagen Networks Study (CNS)** dataset.
 
-## Overview
+---
 
-Implementation of the *ML-Link* framework presented in the following research paper:
+## 1. Project Overview
 
-Lorenzo Zangari, Domenico Mandaglio, Andrea Tagarelli (2024). *Link Prediction on Multilayer Networks through Learning of Within-Layer and Across-Layer Node-Pair Structural Features and Node Embedding Similarity*. In Proceedings of the ACM Web Conference 2024. https://doi.org/10.1145/3589334.3645646
+The base model is **ML-Link** — a multilayer link prediction framework that combines
+a GNN branch (ML-GAT on a supra-adjacency matrix) with a structural feature branch
+(ISL/ESL/CLA). This project adds **temporal side information** learned from the CNS
+interaction layers (calls, SMS, Bluetooth) to improve prediction of Facebook friendships.
 
->Link prediction has traditionally been studied in the context of simple graphs, although real-world networks are inherently complex as they are often comprised of  multiple interconnected components, or layers. Predicting links in such network systems, or multilayer networks, require to consider both the internal structure of a target layer as well as the structure of the other layers in a network, in addition to layer-specific node-attributes when available. This problem poses several challenges, even for graph neural network based approaches despite their successful and wide application to a variety of graph learning problems. In this work, we aim to fill a lack of  multilayer graph representation learning  methods designed for link prediction. Our proposal is a novel neural-network-based learning framework for link prediction on (attributed) multilayer networks, whose key idea is to combine (i) pairwise similarities of multilayer node embeddings learned by a graph neural network model, and (ii) structural features learned from both within-layer and across-layer link information based on overlapping multilayer neighborhoods. Extensive experimental results have shown  that our framework consistently outperforms both single-layer and multilayer methods for link prediction on popular real-world multilayer networks, 
-> with an average percentage increase in AUC up to 38%.
+The CNS dataset has four layers:
 
-Please cite the above paper in any research publication you may produce using this code or data/analysis derived from it.
+| Layer | Index | Description | Role |
+|-------|-------|-------------|------|
+| Calls | 0 | Voice calls between students | Context |
+| SMS | 1 | Text messages | Context |
+| Bluetooth | 2 | Physical proximity | Context |
+| Facebook Friends | 3 | Facebook friendship graph | **Target** |
 
-## Input data
-The original real-world networks we used in our paper are contained within the *data/nets* folder, while the
-preprocessed data can be found in the *data/prep_nets* folder.
+Each experiment removes a fraction of `fb_friends` edges for testing, trains on the
+remainder, and evaluates using AUC and Average Precision (AP).
 
-### Data loading
-To use your own data, first create a sub-folder named *\<dataset\>* inside the *data/nets/* folder, where *\<dataset\>* is the name of the input network.
+---
 
-The *\<dataset\>* folder must include the files *meta_info.txt* and *net.edges*, which are mandatory, and *features.pt* which is optional. These files are described as follows:
+## 3. Requirements & Installation
+### Python version
 
-1. The file *meta_info.txt* contains information about the input network, such as:
-    * *N*, the number of entities.
-    * *L*, the number of layers.
-    * *E*, whether the multilayer graph is directed ('DIRECTED') or undirected ('UNDIRECTED').
-   
-   The file must be formatted with two rows: the first one lists the aforementioned column names (i.e., *N, L, E*), while the second row contains the corresponding column values. For example, given an undirected multiplex graph with 20 entities, 3 layers, 
-   the *meta_info.txt* is defined as follows:
+Python 3.8 or 3.9 is recommended. Python 3.10+ may require adjustments for some
+PyTorch-Geometric packages.
 
-    ```
-    N  L     E
-    20 3  UNDIRECTED
-    ```
+### Install dependencies
+```bash
+pip install torch==1.13.1
+pip install dgl==1.1.1 -f https://data.dgl.ai/wheels/repo.html
+pip install torch-scatter==2.1.1 torch-sparse==0.6.17 \
+    -f https://data.pyg.org/whl/torch-1.13.1+cu116.html
+pip install networkx==3.0 numpy==1.24.1 pandas==1.5.3 \
+            scikit-learn==1.3.0 scipy==1.11.1 tqdm==4.64.1
+```
 
-2. The file *net.edges* contains edge information. 
-The required format is *\<*layer src-node dst-node*\>*, where *src-node* and *dst-node* are the source and the destination nodes, respectively, while *layer* denotes the layer to which the edge belongs. Note that node identifiers must be numeric, progressive and starting from 0, while layers identifiers must start with 1 and be progressive. Furthermore, it is required that the *net.edges* file does not contain duplicate edges. In the case of an undirected graph, the *net.edges* file must not specify edges in both directions.  To see an example of a *net.edges* file, refer to one of the networks within the *data/nets/* folder.
+Or install all at once from `requirements.txt`:
+```bash
+pip install -r requirements.txt
+```
 
+> **GPU note:** The commands above install CUDA 11.6 wheels. Adjust the `+cu116`
+> suffix to match your CUDA version, or use `+cpu` for CPU-only.
 
-3. The file *features.pt* (optional) contains node feature information. It must be a PyTorch tensor with shape (*N***L*, *F*), where *N* is the number of entities, *L* is the number of layers, and *F* is the size of the input features.  Each of the *L* blocks of size *(N,F)* corresponds to the feature matrix of a layer.
+### Verify installation
+```python
+python -c "import torch, dgl; print(torch.__version__, dgl.__version__)"
+# Expected: 1.13.1  1.1.1
+```
 
+---
 
+## 4. Data Preparation
+### Step 1 — Obtain the raw CNS data
+Download the Copenhagen Networks Study dataset from
+[figshare](https://figshare.com/articles/dataset/The_Copenhagen_Networks_Study_interaction_data/7267433).
+You need the following files:
 
-The files described in points 1 and 2 are mandatory. If the node attribute matrix is not provided, the default is to use the identity matrix for each layer. The folder structure should appear as follows:
+- `bt_symmetric.csv` — Bluetooth proximity events
+- `calls.csv` — phone call records
+- `sms.csv` — SMS records
+- `facebook_friends.csv` — Facebook friendship list
+
+Place them in `data/cns_raw/`.
+
+### Step 2 — Build `net.edges` and `meta_info.txt`
+The CNS loader (`input_data/cns_load.py`) expects the network in ML-Link's standard
+format inside `data/nets/cns/`. Create `meta_info.txt`:
 
 ```
-ML-Link
-│   README.md    
-└───data
-    │
-    └───nets
-    │   │   
-    │   └───dataset
-    │         meta_info.txt
-    │         net.edges
-    │         features.pt
-    │          ...
+N    L    E
+692  4    UNDIRECTED
+```
+
+Build `net.edges` with one edge per line in the format `<layer> <src> <dst>`:
+
+- Layer 1 = calls, Layer 2 = SMS, Layer 3 = Bluetooth, Layer 4 = fb_friends
+- Node IDs must be integers starting from 0
+- No duplicate edges; for undirected graphs, list each edge once
+
+The provided `edges.csv` (columns: `source, target, timestamp`) and `nodes.csv`
+can be used to construct `net.edges`. Example conversion:
+
+```python
+import pandas as pd
+
+edges = pd.read_csv("data/cns_raw/edges.csv", comment="#",
+                    names=["layer", "src", "dst", "ts"])
+# edges already in layer/src/dst format — drop timestamp column
+edges[["layer", "src", "dst"]].drop_duplicates().to_csv(
+    "data/nets/cns/net.edges", sep=" ", index=False, header=False)
+```
+
+### Step 3 — Build temporal features
+
+The temporal encoder needs per-node activity tensors of shape `(N, T=7, 9)`.
+Generate them by running:
+
+```bash
+python temporal_preprocess.py \
+    --src data/cns_raw \
+    --dst data/cns_temporal
+```
+
+This reads `bt_symmetric.csv`, `calls.csv`, and `sms.csv` from `data/cns_raw/`,
+divides the study period into **T = 7 windows of ~4 days** each, and saves:
+
+| File | Contents |
+|------|----------|
+| `data/cns_temporal/node_features.pkl` | Dict `{node_id: array(T,9)}` — 9 activity features per window |
+| `data/cns_temporal/context_adj.npz` | Union adjacency of calls+SMS+BT (used for hard negative sampling) |
+| `data/cns_temporal/degree_arrays.pkl` | Per-layer degree arrays used by the encoder |
+
+**Arguments for `temporal_preprocess.py`:**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--src` | `data/cns_raw` | Directory with raw CNS CSV files |
+| `--dst` | `data/cns_temporal` | Output directory for temporal tensors |
+
+---
+
+## 5. Running the Experiments
+
+All experiment scripts perform a sweep over removal rates `{10%, 20%, …, 90%}` with
+`n_runs=5` independent trials per rate, and save results to CSV + JSON in `artifacts/`.
+
+---
+
+### E1 — Baseline ML-Link
+
+Standard ML-Link with identity matrix node features and random negative sampling.
+
+```bash
+python cns_experiment.py \
+    --prep_dir data/nets \
+    --gpu 0 \
+    --n_runs 5 \
+    --epochs 100
+```
+
+**Output:** `artifacts/cns_removal_results.csv` and `artifacts/cns_removal_results.json`
+---
+
+### E2 — k-Hop Extension (k=3)
+
+Extends ML-Link's structural branch to use k-hop neighborhoods instead of the
+default 1-hop. The GNN-NE branch is unaffected — it always uses the original
+1-hop supra-adjacency.
+
+#### How k-hop adjacency is computed
+
+The k-hop adjacency is built once per trial from the 1-hop training graphs using
+matrix powers:
+
+```
+A_k = sign(A + 1/2·A² + 1/4·A³ + ... + 1/2^(k-1)·Aᵏ)
+```
+
+Self-loops are removed and the result is binarized. It is then converted to a
+bidirectional DGL graph with edge weight `w = 1.0` for compatibility with `sfg.py`.
+The per-layer edge counts are printed to stdout on each run, for example:
+
+```
+[k-hop] layer 0: 1-hop edges=348    3-hop edges=12,451
+[k-hop] layer 1: 1-hop edges=348    3-hop edges=11,837
+[k-hop] layer 2: 1-hop edges=79,530 3-hop edges=79,530
+[k-hop] layer 3: 1-hop edges=3,851  3-hop edges=48,203
+```
+
+> Layer 2 (Bluetooth) is already 33% dense — k-hop adds no new edges there.
+> The structural gain comes primarily from the sparse call and SMS layers.
+
+#### Run command
+
+```bash
+python cns_experiment_khop.py \
+    --prep_dir data/nets \
+    --gpu 0 \
+    --n_runs 5 \
+    --epochs 100 \
+    --k_hop 3
+```
+
+**Output:** `artifacts/cns_removal_results_k3.csv` and `artifacts/cns_removal_results_k3.json`
+
+The output CSV includes an additional leading `k_hop` column:
+
+```
+k_hop, removal_rate, auc_mean, auc_std, ap_mean, ap_std
+3,     0.1,          94.79,    4.00,    95.19,   3.67
+3,     0.2,          94.66,    3.98,    94.97,   3.76
 ...
 ```
-### Data preprocessing
-To preprocess the data and create the train/test/validation split, run  the *preprocess.py* script as follows:
-```python
-python preprocess.py --dataset 'ckm' --fold 10 --src './data/nets/' --dst './data/prep_nets'
+
+**All arguments (inherits all E1 arguments, plus):**
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--k_hop` | `1` | Structural neighborhood radius. `1` = original 1-hop ML-Link behavior. Recommended values: `3` or `5` |
+
+> **Note on k=1:** When `--k_hop 1` is passed, `precompute_khop_graphs()` returns
+> the original training graphs unchanged, so the script is equivalent to E1.
+
+#### Trying other k values
+
+The output filename is named automatically based on the k value:
+
+```bash
+python cns_experiment_khop.py --prep_dir data/nets --gpu 0 --k_hop 1
+# → artifacts/cns_removal_results_k1.csv
+
+python cns_experiment_khop.py --prep_dir data/nets --gpu 0 --k_hop 3
+# → artifacts/cns_removal_results_k3.csv
+
+python cns_experiment_khop.py --prep_dir data/nets --gpu 0 --k_hop 5
+# → artifacts/cns_removal_results_k5.csv
 ```
 
-which splits the network (--dataset) *ckm*, located in the source dir (--src) *'../data/nets/'*, in 10 folds (--fold), and save the preprocessed data in the destination directory (--dst) *'../data/prep_nets'*. 
+#### Ablation: disabling individual branches
 
-The set of input arguments of the *preprocess.py* script are listed as follows:
-```
- --dataset DATASET  
-  Input network.
+Both branch flags are available in the k-hop script:
 
- --dst DST          
-  Destination folder where the preprocessed network is saved.
+```bash
+# Structural branch only (disables GNN-NE)
+python cns_experiment_khop.py --prep_dir data/nets --k_hop 3 --no_gnn
 
- --src SRC          
-  Folder where the input network is stored.
-
- --seed SEED        
-  Random seed.
-  
- --fold FOLD         
-  Number of folds for K-fold cross validation.
+# GNN-NE branch only (disables structural features)
+python cns_experiment_khop.py --prep_dir data/nets --k_hop 3 --no_struct
 ```
 
-The default values of these parameters are shown in the *preprocess.py* script.
+#### Checkpoint naming
 
-Assuming the preprocessed network is named *\<dataset\>*, the directory structure following the execution of the preprocess.py script with the previously outlined parameter configuration will look as follows:
+Each trial saves its best checkpoint as:
 ```
-ML-Link
-│   README.md    
-└───data
-    │
-    └───nets
-    │   │   
-    │   └───dataset
-    │       ...
-    └───prep_nets
-    │   │   
-    │   └───dataset
-    │       ...
+checkpoint/{dataset}_k{k_hop}_rate{removal_rate:.2f}_run{run_idx}.pt
+```
+For example: `checkpoint/cns_k3_rate0.40_run2.pt`.
+Checkpoints are deleted automatically at the end of each trial.
+
+---
+
+### E3 — Temporal v1 (Random Negatives)
+
+Temporal encoder (Time2Vec + Transformer) combined with ML-Link. Negative samples
+are drawn uniformly from all non-fb pairs — results are inflated due to easy negatives
+and are included only as a reference point.
+
+```bash
+python cns_experiment_temporal.py \
+    --prep_dir data/nets \
+    --temp_dir data/cns_temporal \
+    --gpu 0 \
+    --n_runs 5
+```
+
+**Output:** `artifacts/cns_temporal_results.csv`
+
+To reproduce the fixed-seed variant (seed=42):
+
+```bash
+python cns_experiment_temporal.py \
+    --prep_dir data/nets \
+    --temp_dir data/cns_temporal \
+    --gpu 0 \
+    --n_runs 5 \
+    --seed 42
+```
+
+**Output:** `artifacts/cns_temporal_results_42.csv`
+
+---
+
+### E4 — Temporal v2 (Relative Features)
+
+Uses window-to-window delta features (changes in activity between consecutive
+windows) instead of absolute activity levels. Underperforms the baseline.
+
+```bash
+python cns_experiment_temporal.py \
+    --prep_dir data/nets \
+    --temp_dir data/cns_temporal \
+    --gpu 0 \
+    --n_runs 5 \
+    --feature_mode relative
+```
+
+**Output:** `artifacts/cns_temporal_v2_results.csv`
+
+---
+
+### E7 — Temporal Side Info
+
+Temporal embeddings are used as the sole node features for ML-Link's GNN. Negative samples are still random; results are inflated and are included as an ablation reference.
+
+```bash
+python cns_experiment_temporal.py \
+    --prep_dir data/nets \
+    --temp_dir data/cns_temporal \
+    --gpu 0 \
+    --n_runs 5
+```
+
+**Output:** `artifacts/cns_temporal_v5_results.csv`
+---
+
+### E8 — Final: Hard Negatives + Side Information
+
+The definitive experiment. Temporal embeddings are concatenated with the identity
+matrix, and **hard negative sampling** ensures negatives are structurally and
+temporally non-trivial.
+
+#### What are hard negatives?
+
+Hard negatives are node pairs that have real BT/SMS/calls contact but are *not*
+Facebook friends. They are sampled by `_sample_hard_negatives()` in `cns_load.py`:
+
+1. Build the context union adjacency: `A_ctx = A_calls ∪ A_SMS ∪ A_BT`
+2. Hard pool = pairs in `A_ctx` but not in `A_fb_friends`
+3. Sample the required number of negatives from the hard pool
+4. If the hard pool is insufficient, fill the remainder with random non-fb pairs
+
+This prevents trivial separation between positives (some temporal activity) and
+random negatives (zero temporal activity) that inflated AUC in E3–E7.
+
+#### Run command
+
+```bash
+# Step 1: build temporal features (skip if already done in Section 4)
+python temporal_preprocess.py \
+    --src data/cns_raw \
+    --dst data/cns_temporal
+
+# Step 2: run the final experiment
+python cns_experiment_temporal_side.py \
+    --prep_dir data/nets \
+    --temp_dir data/cns_temporal \
+    --gpu 0 \
+    --n_runs 5 \
+    --epochs 100
+```
+
+**Output:** `artifacts/cns_temporal_side_results.csv` and `artifacts/cns_temporal_side_results.json`
+
+---
+
+## 6. Understanding the Output Files
+
+Each experiment writes two files to `artifacts/`:
+
+### CSV file
+
+```
+removal_rate, auc_mean, auc_std, ap_mean, ap_std
+0.1,          93.05,    5.69,    93.01,   5.70
+0.2,          96.85,    4.98,    96.80,   5.19
 ...
 ```
 
-### Synthetic networks generation
-To generate the synthetic networks used in the efficiency analysis reported in our paper, first move inside the *./input_data* directory,  then run the *ws_generator.py* script. You can use the following arguments:
+The k-hop experiment (E2) adds a leading `k_hop` column:
+
 ```
- --layers LAYERS  
-   Number of layers.
-
- --nodes NODES    
-   Number of nodes per layer.
-
- --beta BETA      
-   Rewiring probability. 
-
- --seed SEED      
-   Random seed.
+k_hop, removal_rate, auc_mean, auc_std, ap_mean, ap_std
+3,     0.1,          94.79,    4.00,    95.19,   3.67
 ```
 
-The default values of these parameters are shown in the *ws_generator.py* script.
+### JSON file
 
-To generate a network with 3 layers, 500 entities and rewiring probability 0.1, run the 
-*ws_generator.py* script with the following arguments:
+Includes per-run AUC and AP values for full reproducibility:
 
-```python
-python ws_generator.py --nodes 500 --layers 3  --beta 0.1 --seed 72
+```json
+[
+  {
+    "removal_rate": 0.1,
+    "auc_mean": 93.05,
+    "auc_std":  5.69,
+    "ap_mean":  93.01,
+    "ap_std":   5.70,
+    "auc_runs": [87.43, 89.58, 99.93, 88.29, 99.99],
+    "ap_runs":  [87.84, 89.43, 99.92, 87.87, 99.99]
+  },
+  ...
+]
 ```
 
-This will create a folder in *./data/nets/* named *rn_500_3_0.1*. This folder will contain the *meta_info.txt* and the *net.edges* files (as described above), and a file for each layer containing the edges of that layer, that is, *l1.edges* for the first layer.
+### Output file naming
 
-After the network was generated and saved into the *./data/nets/rn_500_3_0.1* folder, you must preprocess it as described in the **Data preprocessing** section, so that it can be used for training the model.
+| Experiment | CSV filename |
+|------------|-------------|
+| E1 Baseline | `cns_removal_results.csv` |
+| E2 k-hop k=N | `cns_removal_results_kN.csv` |
+| E3 Temporal v1 (random seed) | `cns_temporal_results.csv` |
+| E3 Temporal v1 (seed=42) | `cns_temporal_results_42.csv` |
+| E4 Temporal v2 (relative) | `cns_temporal_v2_results.csv` |
+| E7 Side info, no identity | `cns_temporal_v5_results.csv` |
+| E8 Final (hard neg) | `cns_temporal_side_results.csv` |
 
+---
 
-## Usage
-If you are using your own data, you must preprocess it before training the model (**Data preoprocessing** section).
+## Quick Reference — All Commands
 
-To train the model, run the *train.py* script with the following commands:
+```bash
+python temporal_preprocess.py --src data/cns_raw --dst data/cns_temporal
 
-```python
-python train.py --dataset 'ckm' --runs 10 --epochs 100 --omn 'oan;maan' 
-                --prep_dir './data/prep_nets/' --gpu 0 --save_dir './artifacts'
+python cns_experiment.py \
+    --prep_dir data/nets --gpu 0 --n_runs 5 --epochs 100
+
+python cns_experiment_khop.py \
+    --prep_dir data/nets --gpu 0 --n_runs 5 --epochs 100 --k_hop 3
+
+python cns_experiment_temporal.py \
+    --prep_dir data/nets --temp_dir data/cns_temporal --gpu 0 --n_runs 5
+
+python cns_experiment_temporal.py \
+    --prep_dir data/nets --temp_dir data/cns_temporal --gpu 0 --n_runs 5 --seed 42
+
+python cns_experiment_temporal_side.py \
+    --prep_dir data/nets --temp_dir data/cns_temporal --gpu 0 --n_runs 5 --epochs 100
 ```
-
-This will train the model on the *ckm* network (specified by *--dataset*). The preprocessed data of this network (indicated by *--prep_dir*) is located in './data/prep_nets/'. 
-The training will be conducted on the GPU device 0 (*--gpu*), and it will run for 100 epochs (*--epochs*) 
-for each of the 10 fold (*--fold*), employing OAN and MAAN (*--omn*) as overlapping multilayer neighborhoods. 
-Note that if you do not want to use overlapping multilayer neighborhoods, you can provide either the empty string or the string 'none' to the *--omn* argument.
-
-The AP and AUC values yielded by the model are saved into the *./artifacts/results* folder (*--save_dir*). See the **Input arguments** section for additional details.
-
-
-## Input arguments
-The input arguments for the ML-Link framework are listed as follows:
-```
- --dataset DATASET     
-  Name of the input network, whose name identifies a particular subfolder of 'data/nets'.
-
- --gpu GPU             
-  Which GPU to use (-1 for CPU).
-
- --seed SEED
-  Random seed.
-
- --runs RUNS 
-  Number of runs (should match the number of folds).
-
- --edge_dim EDGE_DIM   
-   Hidden dimension of the edge MLP.
-
- --node_dim NODE_DIM   
-   Hidden dimension of node MLP.
-
- --phi_dim PHI_DIM     
-   Hidden dimension of context MLP.
-
- --hidden_dim HIDDEN_DIM
-   Hidden dimension of the GNN layers.
-
- --num_hidden NUM_HIDDEN
-   Numbers of hidden layers of the GNN.
-
- --epochs EPOCHS       
-   Number of epochs.
-
- --n_heads N_HEADS     
-    Number of attention heads of GNN.
-
- --heads_mode HEADS_MODE
-   Concatenate ('concat') or averaging ('avg') the multiple  attention heads.
-
- --predictor PREDICTOR
-   MLP decoder to use ("mlp").
-
- --omn OMN
-   Types of overlapping multilayer neighborhoods. 
-   Supported types are oan ('oan') and maan ('maan'). 
-   Each overlapping multilayer neighborhood must be followed by a semicolon, e.g., 'oan;maan'
-
- --dropout DROPOUT     
-   Dropout rate.
-
- --attn_dropout ATTN_DROPOUT
-   Attention dropout rate for attention based GNN models.
-
- --lr LR 
-   Learning rate
-
- --weight-decay WEIGHT_DECAY
-    Weight decay (L2 loss).
-
- --psi PSI             
-   Impact of overlapping multilayer neighborhoods.
-
- --no_gnn              
-   Whether to use only the NN-NPN component.
-
- --no_struct           
-   Whether to use only the GNN-NE component.
-
- --root ROOT           
-   Root directory of input data.
-
---save_dir SAVE_DIR   
-   Folder where the performance scores are saved.
-
---prep_dir PREP_DIR   
-   Folder storing the preprocessed data.
-
- --ck_dir CK_DIR       
-   Folder where the checkpoint model is saved.
-```
-
-Modify the file *params.py* to change the default values of the parameters.
-## Requirements and environment
-
-The required libraries are listed in the file *requirements.txt*.
-
-
-## Hyper-parameters selection
-
-Below are the best hyper-parameters found on each dataset used in the evaluation reported in the submitted paper:
-
-- Cs-Aarhus:
-  - hidden_dim = 128; attn_dropout = 0.3;
-- CKM:
-  - hidden_dim = 64; attn_dropout = 0.3;
-- Elegans:
-  - hidden_dim = 128, attn_dropout_0.7; n_heads = 4; heads_mode = 'concat'
-- Lazega:
-  - hidden_dim = 64; attn_dropout = 0.7;
-- DkPol:
-  - hidden_dim = 32; attn_dropout = 0.3;
-- ArXiv:
-  - hidden_dim = 256; attn_dropout = 0.3;
-- Synthetic networks:
-  - hidden_dim = 256; attn_dropout=0.7; epochs=10/20 for the class of synthetic networks generated with rewiring probability 0.1/0.5.
-
-Other hyper-parameters are shared by all datasets. You can find their default value inside the *params.py* file.
-
